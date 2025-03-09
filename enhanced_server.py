@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import sys
+from dotenv import load_dotenv, find_dotenv
 import signal
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
@@ -23,6 +24,10 @@ from src.server.mongodb_client import MongoDBClient
 from src.action_handler import action_registry  # For listing tools
 # No need to import AnthropicConnection directly here
 
+# Analyze thinking depth based on query complexity
+from src.thinking_framework.thinking_depth_selector import analyze_thinking_depth
+from src.server.structured_response_handler import StructuredResponseHandler
+
 # --- External API Imports ---
 from backend.dex_api_client.wallet_service_client import WalletServiceClient
 from backend.dex_api_client.okx_web3_client import OkxWeb3Client
@@ -31,9 +36,9 @@ from backend.dex_api_client.cave_client import CaveClient
 from backend.dex_api_client.public_data import get_binance_tickers
 
 # Configure logging
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("zerepy_server")
-
+load_dotenv(find_dotenv())
 
 # --- Message Structure ---
 class MessageStructure:
@@ -213,7 +218,7 @@ class MultiClientManager:
         logger.info(f"Agent set for user {wallet_address}")
 
     async def handle_client_message(self, wallet_address: str, message_data: Dict[str, Any]):
-        """Process an incoming client message with AI-driven tool selection."""
+        """Process an incoming client message with AI-driven tool selection and thinking depth evaluation."""
         logger.debug(f"Handling message for {wallet_address}: {message_data}")
 
         if wallet_address in self.user_sessions:
@@ -262,16 +267,60 @@ class MultiClientManager:
             if not agent.is_llm_set:
                 agent._setup_llm_provider()
 
-            # Analyze thinking depth based on query complexity
-            from src.thinking_framework.thinking_depth_selector import analyze_thinking_depth
-            from src.server.structured_response_handler import StructuredResponseHandler
+            # Get conversation context and wallet information
+            conversation_history = await self.db_client.get_conversation_history(wallet_address)
 
-            # Determine thinking depth
-            thinking_result = analyze_thinking_depth(user_text)
+            # Check if this is a crypto wallet interaction
+            user_data = await self.db_client.get_user(wallet_address)
+            has_multisig = user_data and user_data.get("multisig_info") and len(user_data.get("multisig_info", [])) > 0
+
+            conversation_context = {
+                "conversation_length": len(conversation_history),
+                "last_messages": conversation_history[-5:] if len(conversation_history) >= 5 else conversation_history,
+                "wallet_address": wallet_address,
+                "has_multisig_wallet": has_multisig,
+                "domain": "crypto"  # Indicate this is a cryptocurrency context
+            }
+            print('conversation_context: ', conversation_context)
+
+            # Use LLM to determine thinking depth
+            thinking_result = await analyze_thinking_depth(user_text, agent, conversation_context)
             thinking_depth = thinking_result["depth"]
+            detected_intents = thinking_result["detected_intents"]
+
+            print('thinking_result: ', thinking_result)
+            print('thinking_depth: ', thinking_depth)
+            print('detected_intents: ', detected_intents)
+
+            # Transaction-related queries require additional preparation steps
+            transaction_intents = ["transaction_intent", "defi_operation", "whitelist_operation",
+                                   "chain_interaction", "multisig_operation"]
+            has_transaction_intent = any(intent in transaction_intents for intent in detected_intents)
+
+            print('has_transaction_intent: ', has_transaction_intent)
+            # For transaction intents, force deep thinking and prepare necessary services
+            if has_transaction_intent and thinking_depth != "deep":
+                logger.warning(f"Transaction intent detected but thinking depth was {thinking_depth}. Forcing to DEEP.")
+                thinking_depth = "deep"
+
+            # Log the thinking depth and intents for debugging
+            logger.info(f"Thinking depth determined for query: {thinking_depth}")
+            logger.info(f"Detected intents: {detected_intents}")
+
+            # For deep thinking transaction operations, do additional setup
+            if thinking_depth == "deep" and has_transaction_intent:
+                # Add a preliminary thinking step to show user we're preparing a thorough response
+                await self.send_message(
+                    wallet_address,
+                    MessageStructure.format_thinking("This requires careful analysis. Preparing a detailed response...")
+                )
 
             # Create prompt for tool selection
-            tools_prompt = "Based on the user's query, determine if you need to use a specific tool to respond. Available tools:\n"
+            tools_prompt = f"""Based on the user's query, determine if you need to use a specific tool to respond.
+    The query requires {thinking_depth} thinking depth and has these intents: {', '.join(detected_intents) if detected_intents else 'no specific intent'}.
+
+    Available tools:
+    """
 
             # List available tools with descriptions
             available_tools = []
@@ -288,11 +337,12 @@ class MultiClientManager:
             # Ask the LLM to decide which tool to use
             system_prompt = "You are an AI assistant that analyzes user requests and determines which tools to use."
             tool_selection_response = agent.connection_manager.perform_action(
-                connection_name="timetool",
+                connection_name="anthropic",
                 action_name="generate-text",
                 params=[tools_prompt, system_prompt]
             )
 
+            print('tool_selection_response77777: ', tool_selection_response)
             # Try to parse JSON response to get tool selection
             tool_name = None
             tool_params = {}
@@ -319,19 +369,70 @@ class MultiClientManager:
 
                 # Execute the selected tool
                 response = agent.connection_manager.perform_action(
-                    connection_name="timetool",
+                    connection_name="crypto_tools",
                     action_name=tool_name,
                     params=tool_params
                 )
+
+                print('tool_selection_response8888: ', tool_selection_response)
             else:
                 # Standard text generation for queries not requiring specific tools
-                logger.info(f"No specific tool selected, using standard text generation")
-                system_prompt = agent._construct_system_prompt()
+                logger.info(f"No specific tool selected, using standard text generation with {thinking_depth} depth")
+
+                # Craft system prompt that includes thinking depth guidance and crypto-specific instructions
+                base_system_prompt = agent._construct_system_prompt()
+
+                # Add crypto-specific instruction based on thinking depth and intents
+                crypto_instructions = ""
+                if "transaction_intent" in detected_intents:
+                    crypto_instructions = """
+    As a crypto assistant, prioritize security and thorough analysis for transaction-related queries:
+    1. Check if the token exists on the specified chain
+    2. Evaluate token security and legitimacy 
+    3. Check for sufficient liquidity
+    4. Consider gas costs and slippage
+    5. Always warn about potential risks
+    6. For direct transactions, explain all the necessary steps
+    """
+                elif "security_assessment" in detected_intents:
+                    crypto_instructions = """
+    When evaluating token or contract security:
+    1. Check contract code patterns if available
+    2. Look for red flags like unlimited minting, hidden owners, or transfer restrictions
+    3. Consider liquidity depth and token distribution
+    4. Check for audit status
+    5. Be appropriately cautious in assessment
+    """
+
+                # Add thinking depth guidance
+                enhanced_system_prompt = f"{base_system_prompt}\n{crypto_instructions}\n\nThis query requires {thinking_depth} thinking depth. "
+
+                if thinking_depth == "light":
+                    enhanced_system_prompt += "Provide a concise, factual answer focused on the specific information requested."
+                elif thinking_depth == "medium":
+                    enhanced_system_prompt += "Provide a balanced response with relevant market context and moderate reasoning."
+                else:  # deep
+                    enhanced_system_prompt += """Provide a comprehensive response with:
+    1. Thorough analysis broken into clear sections
+    2. Security considerations and risk assessment
+    3. Step-by-step guidance where appropriate
+    4. Explicit warnings about potential risks
+    5. Clear conclusions and recommendations"""
+
+                # For transaction intents, use a specialized system prompt
+                if has_transaction_intent and thinking_depth == "deep":
+                    # Show the user we're doing a thorough analysis
+                    await self.send_message(
+                        wallet_address,
+                        MessageStructure.format_thinking("Analyzing token security and transaction parameters...")
+                    )
+
                 response = agent.connection_manager.perform_action(
-                    connection_name="timetool",
+                    connection_name="anthropic",
                     action_name="generate-text",
-                    params=[user_text, system_prompt]
+                    params=[user_text, enhanced_system_prompt]
                 )
+                print('response0000: ', response)
 
             # For medium/deep thinking, structure the response
             if thinking_depth in ["medium", "deep"]:
@@ -341,10 +442,12 @@ class MultiClientManager:
                     raw_response=response,
                     thinking_level=thinking_depth
                 )
+                print('response1111: ', response)
 
                 # Use the final answer from the structured response
                 response = structured_response["final_answer"]
 
+                print('response22222 : ', response)
             # Send response
             await self.send_message(
                 wallet_address,
@@ -430,7 +533,8 @@ async def lifespan(app: FastAPI):
         except ValueError:
             # If we're not in the main thread, this will fail
             pass
-
+    print("Server initialized successfully")
+    print(os.getenv("OKX_WEB3_PROJECT_ID"))
     # Initialize API clients
     okx_client = OkxWeb3Client(
         project_id=os.getenv("OKX_WEB3_PROJECT_ID"),
@@ -452,6 +556,8 @@ async def lifespan(app: FastAPI):
     app.state.third_party_client = third_party_client
     app.state.cave_client = cave_client
     app.state.wallet_service_client = wallet_service_client
+
+    print("Server initialized successfully")
 
     # Create MultiClientManager, passing the db_client
     app.state.connection_manager = MultiClientManager(db_client=db_client)
@@ -527,11 +633,8 @@ class ZerePyServer:
             try:
                 while True:
                     data = await websocket.receive_text()
-                    print('-----------------')
-                    print(data)
                     try:
                         message_data = json.loads(data)
-                        print("message_data: ", message_data, "wallet_address: ", wallet_address)
                         await connection_manager.handle_client_message(wallet_address, message_data)
                     except json.JSONDecodeError:
                         await connection_manager.send_message(

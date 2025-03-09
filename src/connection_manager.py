@@ -21,6 +21,7 @@ from src.connections.evm_connection import EVMConnection
 from src.connections.perplexity_connection import PerplexityConnection
 from src.connections.monad_connection import MonadConnection
 from src.connections.timetool_connection import TimeToolConnection
+from src.connections.crypto_tools_connection import CryptoToolsConnection
 
 logger = logging.getLogger("connection_manager")
 
@@ -37,6 +38,8 @@ class ConnectionManager:
             return TwitterConnection
         elif class_name == "timetool":
             return TimeToolConnection
+        elif class_name == "crypto_tools":
+            return CryptoToolsConnection
         elif class_name == "anthropic":
             return AnthropicConnection
         elif class_name == "openai":
@@ -53,8 +56,6 @@ class ConnectionManager:
             return EchochambersConnection
         elif class_name == "goat":
             return GoatConnection
-        elif class_name == "solana":
-            return SolanaConnection
         elif class_name == "hyperbolic":
             return HyperbolicConnection
         elif class_name == "galadriel":
@@ -63,8 +64,6 @@ class ConnectionManager:
             return SonicConnection
         elif class_name == "discord":
             return DiscordConnection
-        elif class_name == "allora":
-            return AlloraConnection
         elif class_name == "xai":
             return XAIConnection
         elif class_name == "ethereum":
@@ -177,12 +176,12 @@ class ConnectionManager:
         try:
             connection = self.connections[connection_name]
 
+
             if not connection.is_configured():
                 logging.error(
                     f"\nError: Connection '{connection_name}' is not configured"
                 )
                 return None
-
             if action_name not in connection.actions:
                 logging.error(
                     f"\nError: Unknown action '{action_name}' for connection '{connection_name}'"

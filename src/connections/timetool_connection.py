@@ -2,12 +2,21 @@ import logging
 import os
 import json
 import requests
-from typing import Dict, Any
+from typing import Dict, List, Any
 from datetime import datetime
 from dotenv import load_dotenv, set_key
 from anthropic import Anthropic
 
 from src.connections.base_connection import BaseConnection, Action, ActionParameter
+from src.actions.crypto_actions import (
+    check_token_price,
+    check_token_security,
+    analyze_crypto_portfolio,
+    get_hot_tokens,
+    check_token_liquidity,
+    suggest_crypto_portfolio,
+    get_wallet_balance
+)
 
 logger = logging.getLogger("connections.timetool_connection")
 
@@ -31,8 +40,11 @@ class TimeToolConnection(BaseConnection):
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
         self._client = None
+        self.agent = None  # Will be set later when handling tool requests
+
         # Define time tools
         self.time_tools = [
+            # Basic time tools
             {
                 "name": "get_time",
                 "description": "Get the current time",
@@ -72,6 +84,126 @@ class TimeToolConnection(BaseConnection):
                         }
                     },
                     "required": ["symbol"]
+                }
+            },
+
+            # Crypto tools from crypto_actions.py
+            {
+                "name": "check_token_price",
+                "description": "Check the current price of a cryptocurrency token",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "The token query text (e.g., 'Check ETH price')"
+                        }
+                    },
+                    "required": ["query"]
+                }
+            },
+            {
+                "name": "check_token_security",
+                "description": "Analyze a token's security profile and potential risks",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "The token query with symbol and address"
+                        }
+                    },
+                    "required": ["query"]
+                }
+            },
+            {
+                "name": "analyze_portfolio",
+                "description": "Analyze a cryptocurrency portfolio for performance, risk, and recommendations",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "The portfolio description with token amounts"
+                        }
+                    },
+                    "required": ["query"]
+                }
+            },
+            {
+                "name": "get_hot_tokens",
+                "description": "Get trending/hot tokens on a specific blockchain",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Query describing which chain to look at"
+                        },
+                        "chain_id": {
+                            "type": "string",
+                            "description": "Optional specific chain ID (e.g., '8453' for Base)"
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Number of tokens to return"
+                        }
+                    },
+                    "required": ["query"]
+                }
+            },
+            {
+                "name": "check_token_liquidity",
+                "description": "Check liquidity for a token on a specific chain",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Query with token symbol and address"
+                        }
+                    },
+                    "required": ["query"]
+                }
+            },
+            {
+                "name": "suggest_portfolio",
+                "description": "Suggest a diversified cryptocurrency portfolio based on user requirements",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Query with investment amount and risk preference"
+                        },
+                        "amount": {
+                            "type": "number",
+                            "description": "Investment amount in USD"
+                        },
+                        "risk": {
+                            "type": "string",
+                            "description": "Risk profile: 'low', 'medium', or 'high'"
+                        }
+                    },
+                    "required": ["query"]
+                }
+            },
+            {
+                "name": "get_wallet_balance",
+                "description": "Check balance of a wallet address on specified chain",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "wallet_address": {
+                            "type": "string",
+                            "description": "Wallet address to check"
+                        },
+                        "chain_id": {
+                            "type": "string",
+                            "description": "Chain ID to query"
+                        }
+                    },
+                    "required": ["wallet_address"]
                 }
             }
         ]
@@ -126,6 +258,63 @@ class TimeToolConnection(BaseConnection):
                     ActionParameter("symbol", True, str, "Symbol to get the price of")
                 ],
                 description="Get the current price of a symbol"
+            ),
+
+            # Add crypto actions
+            "check-token-price": Action(
+                name="check-token-price",
+                parameters=[
+                    ActionParameter("query", True, str, "The token query text")
+                ],
+                description="Check the current price of a cryptocurrency token"
+            ),
+            "check-token-security": Action(
+                name="check-token-security",
+                parameters=[
+                    ActionParameter("query", True, str, "The token security query")
+                ],
+                description="Analyze a token's security profile and potential risks"
+            ),
+            "analyze-portfolio": Action(
+                name="analyze-portfolio",
+                parameters=[
+                    ActionParameter("query", True, str, "The portfolio query text"),
+                    ActionParameter("portfolio", False, list, "Portfolio data (optional)")
+                ],
+                description="Analyze a cryptocurrency portfolio for performance and risk"
+            ),
+            "get-hot-tokens": Action(
+                name="get-hot-tokens",
+                parameters=[
+                    ActionParameter("query", True, str, "The hot tokens query text"),
+                    ActionParameter("chain_id", False, str, "Chain ID"),
+                    ActionParameter("limit", False, int, "Number of tokens to return")
+                ],
+                description="Get trending/hot tokens on a specific blockchain"
+            ),
+            "check-token-liquidity": Action(
+                name="check-token-liquidity",
+                parameters=[
+                    ActionParameter("query", True, str, "The token liquidity query")
+                ],
+                description="Check liquidity for a token on a specific chain"
+            ),
+            "suggest-portfolio": Action(
+                name="suggest-portfolio",
+                parameters=[
+                    ActionParameter("query", True, str, "The portfolio suggestion query"),
+                    ActionParameter("amount", False, float, "Investment amount in USD"),
+                    ActionParameter("risk", False, str, "Risk profile")
+                ],
+                description="Suggest a diversified cryptocurrency portfolio"
+            ),
+            "get-wallet-balance": Action(
+                name="get-wallet-balance",
+                parameters=[
+                    ActionParameter("wallet_address", True, str, "Wallet address to check"),
+                    ActionParameter("chain_id", False, str, "Chain ID")
+                ],
+                description="Check balance of a wallet address"
             )
         }
 
@@ -137,6 +326,10 @@ class TimeToolConnection(BaseConnection):
                 raise TimeToolConfigurationError("Anthropic API key not found in environment")
             self._client = Anthropic(api_key=api_key)
         return self._client
+
+    def set_agent(self, agent):
+        """Set the agent instance for tool execution"""
+        self.agent = agent
 
     def _handle_tool_use(self, message, original_query, system_prompt):
         """Handle tool use requests and return results"""
@@ -173,6 +366,7 @@ class TimeToolConnection(BaseConnection):
             logger.debug(f"Processing tool: {tool_name}, ID: {tool_id}")
 
             try:
+                # Basic time and price tools
                 if tool_name == "get_time":
                     result = self.get_time()
                 elif tool_name == "get_date":
@@ -182,6 +376,62 @@ class TimeToolConnection(BaseConnection):
                 elif tool_name == "get_symbol_price":
                     symbol = tool_use.input.get("symbol")
                     result = self.get_symbol_price(symbol)
+
+                # Crypto tools - requires agent to be set
+                elif tool_name == "check_token_price":
+                    if not self.agent:
+                        result = "Error: Agent not configured for crypto tools"
+                    else:
+                        query = tool_use.input.get("query", "")
+                        result = check_token_price(self.agent, query=query)
+
+                elif tool_name == "check_token_security":
+                    if not self.agent:
+                        result = "Error: Agent not configured for crypto tools"
+                    else:
+                        query = tool_use.input.get("query", "")
+                        result = check_token_security(self.agent, query=query)
+
+                elif tool_name == "analyze_portfolio":
+                    if not self.agent:
+                        result = "Error: Agent not configured for crypto tools"
+                    else:
+                        query = tool_use.input.get("query", "")
+                        result = analyze_crypto_portfolio(self.agent, query=query)
+
+                elif tool_name == "get_hot_tokens":
+                    if not self.agent:
+                        result = "Error: Agent not configured for crypto tools"
+                    else:
+                        query = tool_use.input.get("query", "")
+                        chain_id = tool_use.input.get("chain_id", "8453")  # Default to Base
+                        limit = tool_use.input.get("limit", 5)
+                        result = get_hot_tokens(self.agent, query=query, chain_id=chain_id, limit=limit)
+
+                elif tool_name == "check_token_liquidity":
+                    if not self.agent:
+                        result = "Error: Agent not configured for crypto tools"
+                    else:
+                        query = tool_use.input.get("query", "")
+                        result = check_token_liquidity(self.agent, query=query)
+
+                elif tool_name == "suggest_portfolio":
+                    if not self.agent:
+                        result = "Error: Agent not configured for crypto tools"
+                    else:
+                        query = tool_use.input.get("query", "")
+                        amount = tool_use.input.get("amount", 0)
+                        risk = tool_use.input.get("risk", "medium")
+                        result = suggest_crypto_portfolio(self.agent, query=query, amount=amount, risk=risk)
+
+                elif tool_name == "get_wallet_balance":
+                    if not self.agent:
+                        result = "Error: Agent not configured for crypto tools"
+                    else:
+                        wallet_address = tool_use.input.get("wallet_address", "")
+                        chain_id = tool_use.input.get("chain_id", "8453")
+                        result = get_wallet_balance(self.agent, wallet_address=wallet_address, chain_id=chain_id)
+
                 else:
                     result = f"Unknown tool: {tool_name}"
 
@@ -276,7 +526,6 @@ class TimeToolConnection(BaseConnection):
             raise TimeToolAPIError(f"Failed to get datetime: {e}")
 
     def get_symbol_price(self, symbol: str) -> str:
-        print('AI trying to use get_symbol_price')
         """Get the current price of a symbol"""
         try:
             url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}"
@@ -347,6 +596,23 @@ class TimeToolConnection(BaseConnection):
         errors = action.validate_params(kwargs)
         if errors:
             raise ValueError(f"Invalid parameters: {', '.join(errors)}")
+
+        # For crypto tools actions, we need to set the agent
+        if action_name in ["check-token-price", "check-token-security", "analyze-portfolio",
+                           "get-hot-tokens", "check-token-liquidity", "suggest-portfolio",
+                           "get-wallet-balance"] and self.agent is None:
+            # If agent is passed in kwargs, use it
+            if "agent" in kwargs:
+                self.agent = kwargs.pop("agent")
+            else:
+                from src.agent import ZerePyAgent
+                # Try to get agent from global or create one
+                try:
+                    from src.cli import ZerePyCLI
+                    cli = ZerePyCLI()
+                    self.agent = cli.agent
+                except:
+                    pass
 
         # Call the appropriate method based on action name
         method_name = action_name.replace('-', '_')
