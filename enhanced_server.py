@@ -13,17 +13,22 @@ from uuid import uuid4
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depends, Query, Request
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depends, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-# Import ZerePy modules
 from src.agent import ZerePyAgent
-from src.connection_manager import ConnectionManager as ZerePyConnectionManager
-from src.helpers import print_h_bar
-
-# Additional imports for server functionality
+# --- ZerePy Imports ---
 from src.server.mongodb_client import MongoDBClient
+from src.action_handler import action_registry  # For listing tools
+# No need to import AnthropicConnection directly here
+
+# --- External API Imports ---
+from backend.dex_api_client.wallet_service_client import WalletServiceClient
+from backend.dex_api_client.okx_web3_client import OkxWeb3Client
+from backend.dex_api_client.third_client import ThirdPartyClient
+from backend.dex_api_client.cave_client import CaveClient
+from backend.dex_api_client.public_data import get_binance_tickers
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -53,6 +58,30 @@ class MessageStructure:
     @staticmethod
     def format_ai_response(text: str) -> Dict[str, Any]:
         return MessageStructure.format_message("agent", text)
+
+
+class BaseAiWalletAddress(BaseModel):
+    wallet_address: str
+
+
+class BaseAgentAddress(BaseModel):
+    agent_address: str
+
+
+class BaseAgentName(BaseModel):
+    agent_name: Optional[str] = "timetool_agent"
+
+
+class BaseChainId(BaseModel):
+    chain_id: int = 8453
+
+
+class CreateAgent(BaseAiWalletAddress, BaseAgentName):
+    pass
+
+
+class RegisterMultiSigWallet(BaseAiWalletAddress, BaseChainId):
+    pass
 
 
 # --- MultiClientManager class for handling multiple WebSocket connections ---
@@ -270,6 +299,7 @@ class MultiClientManager:
             )
         finally:
             self.set_agent_busy(wallet_address, False)
+
     async def _ping_clients(self):
         """Periodically ping clients to keep connections alive and check for timeouts."""
         try:
@@ -312,26 +342,19 @@ class MultiClientManager:
 # --- Server Initialization ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Initialize MongoDB client
+    """Initialize the server and clean up resources on shutdown."""
+
+    # Initialize MongoDB
     mongodb_url = os.getenv("MONGODB_URL", "mongodb://localhost:27017")
     database_name = os.getenv("DATABASE_NAME", "zerepy_db")
     db_client = MongoDBClient(mongodb_url, database_name)
-
-    # 嘗試初始化索引，但不讓失敗阻止應用程序啟動
-    try:
-        await db_client.initialize_indexes()
-    except Exception as e:
-        logger.error(f"索引初始化失敗，但應用程序將繼續啟動: {e}")
-
-    # Store the db_client in the app state
-    app.state.db_client = db_client
-
+    await db_client.initialize_indexes()
+    app.state.db_client = db_client  # Store db_client
     # Create and store the connection manager
     app.state.connection_manager = MultiClientManager(db_client)
 
-    # Handle graceful shutdown
     def signal_handler():
-        logger.info("接收到關閉信號，正在關閉連接...")
+        logger.info("Received close signal, closing connections...")
 
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
@@ -340,9 +363,42 @@ async def lifespan(app: FastAPI):
             # If we're not in the main thread, this will fail
             pass
 
-    logger.info("伺服器初始化完成")
+    # Initialize API clients
+    okx_client = OkxWeb3Client(
+        project_id=os.getenv("OKX_WEB3_PROJECT_ID"),
+        api_key=os.getenv("OKX_WEB3_PROJECT_KEY"),
+        api_secret=os.getenv("OKX_WEB3_PROJECT_SECRET"),
+        api_passphrase=os.getenv("OKX_WEB3_PROJECT_PASSWRD"),
+    )
+    third_party_client = ThirdPartyClient()
+    cave_client = CaveClient(os.getenv("CAVE_API_KEY"))
+    wallet_service_client = WalletServiceClient()
+    await okx_client.initialize()
+    await third_party_client.initialize()
+    try:
+        await cave_client.initialize()
+    except Exception as e:
+        logger.error(f"Error initializing CaveClient: {e}")
+
+    app.state.okx_client = okx_client
+    app.state.third_party_client = third_party_client
+    app.state.cave_client = cave_client
+    app.state.wallet_service_client = wallet_service_client
+
+    # Create MultiClientManager, passing the db_client
+    app.state.connection_manager = MultiClientManager(db_client=db_client)
+
+    logger.info("Server initialized successfully")
     yield
-    logger.info("伺服器正在關閉")
+    logger.info("Server shutting down")
+    try:
+        await okx_client.close()
+        await third_party_client.close()
+        await cave_client.close()
+        await wallet_service_client.close()
+        logger.info("Server shutdown complete")
+    except Exception as e:
+        logger.error(f"Error shutting down server: {e}")
 
 
 class ZerePyServer:
@@ -428,21 +484,21 @@ class ZerePyServer:
                 connection_manager.disconnect(wallet_address)
 
         # List available agents
-        @self.app.get("/api/agents")
+        @self.app.get("/api/agents", tags=['agent'])
         async def list_agents():
             try:
                 agents = []
-                agents_dir = Path("agents")
+                agents_dir = Path("agents")  # 假設 agents 目錄在專案根目錄
                 if agents_dir.exists():
                     for agent_file in agents_dir.glob("*.json"):
+                        # 排除 "general" 或您想要排除的其他檔案
                         if agent_file.stem != "general":
                             agents.append(agent_file.stem)
                 return {"agents": agents}
             except Exception as e:
                 raise HTTPException(status_code=500, detail=str(e))
 
-        # Get user information
-        @self.app.get("/api/user/{wallet_address}")
+        @self.app.get("/api/user/{wallet_address}", tags=['user'])
         async def get_user_info(wallet_address: str):
             wallet_address = wallet_address.lower()
             user = await self.app.state.db_client.get_user(wallet_address)
@@ -450,10 +506,22 @@ class ZerePyServer:
                 raise HTTPException(status_code=404, detail="User not found")
             return user
 
-        # Create user if not exists and get status
-        @self.app.post("/api/user/{wallet_address}")
-        async def create_or_get_user(wallet_address: str):
+        @self.app.get("/api/user-status", tags=['user'])
+        async def check_user_status(wallet_address: str):
+            """檢查用戶狀態API端點"""
             wallet_address = wallet_address.lower()
+            user = await self.app.state.db_client.get_user(wallet_address)
+            if not user:
+                return {"has_agent": False, "multisig_info": None}
+            return {
+                "has_agent": user.get("has_agent", False),
+                "multisig_info": user.get("multisig_info")
+            }
+
+        # Create user if not exists and get status
+        @self.app.post("/api/user", tags=['user'])
+        async def create_or_get_user(data: BaseAiWalletAddress):
+            wallet_address = data.wallet_address.lower()
             user = await self.app.state.db_client.get_user(wallet_address)
 
             if not user:
@@ -466,22 +534,20 @@ class ZerePyServer:
                 "agent_id": user.get("agent_id")
             }
 
-        # Get conversation history
-        @self.app.get("/api/conversation/{wallet_address}")
-        async def get_conversation(wallet_address: str, limit: int = Query(50, gt=0, lt=1000)):
-            wallet_address = wallet_address.lower()
+        # 2. Agent相關端點
+        @self.app.get("/api/conversation/{wallet_address}", tags=['agent'])
+        async def get_conversation(data: BaseAiWalletAddress):
+            """Get conversation history API endpoint"""
+            wallet_address = data.wallet_address.lower()
             history = await self.app.state.db_client.get_conversation_history(wallet_address)
-
-            # Only return the last 'limit' messages
-            if len(history) > limit:
-                history = history[-limit:]
-
             return {"messages": history}
 
-        # Create a user agent
-        @self.app.post("/api/create-agent/{wallet_address}")
-        async def create_agent(wallet_address: str, agent_name: str = Query(default="timetool_agent")):
-            wallet_address = wallet_address.lower()
+        @self.app.post("/api/create-agent", tags=['agent'])
+        # async def create_agent(wallet_address: str, agent_name: str = Query(default="timetool_agent")):
+        async def create_agent(data: CreateAgent):
+            wallet_address = data.wallet_address.lower()
+            print(wallet_address)
+            print('-----------------')
             user = await self.app.state.db_client.get_user(wallet_address)
 
             if not user:
@@ -495,6 +561,23 @@ class ZerePyServer:
                     "agent_id": user.get("agent_id")
                 }
 
+            # Create agent address
+            try:
+                res = await self.app.state.wallet_service_client.create_ai_wallet(
+                    wallet_address
+                )
+                # aiohttp.client_exceptions.ClientResponseError: 409, message='Conflict' = mean the wallet already exists
+            except Exception as e:
+                if e.status == 409:
+                    res = await self.app.state.wallet_service_client.get_ai_wallet_address(wallet_address)
+                else:
+                    logger.error(f"Error creating agent ai wallet address: {e}")
+                    raise HTTPException(status_code=500, detail=f"Failed to create agent ai wallet address: {str(e)}")
+
+            ai_agent_address = res.get("aiAddress", None)
+            if not ai_agent_address:
+                raise HTTPException(status_code=500, detail="Failed to create agent ai wallet address failed.")
+
             # Create agent
             agent_id = str(uuid4())
             await self.app.state.db_client.db.users.update_one(
@@ -502,7 +585,9 @@ class ZerePyServer:
                 {"$set": {
                     "agent_id": agent_id,
                     "has_agent": True,
-                    "agent_name": agent_name,
+                    "agent_name": data.agent_name,
+                    "agent_address": ai_agent_address,
+                    "multisig_info": [],  # Add multisig info here, but not in this endpoint
                     "created_at": datetime.now(),
                     "last_active": datetime.now()
                 }}
@@ -512,11 +597,189 @@ class ZerePyServer:
                 "success": True,
                 "message": "Agent created successfully",
                 "agent_id": agent_id,
-                "agent_name": agent_name
+                "agent_name": data.agent_name  # 返回 agent_name
             }
 
+        @self.app.get("/api/agent-status/{wallet_address}", tags=['agent'])
+        async def get_agent_status(wallet_address: str):
+            """獲取Agent狀態API端點"""
+            wallet_address = wallet_address.lower()
+            user = await self.app.state.db_client.get_user(wallet_address)
+
+            if user:
+                return {
+                    "has_agent": user.get("has_agent", False),
+                    "multisig_info": user.get("multisig_info"),
+                }
+            else:
+                return {"has_agent": False, "multisig_info": None}
+
+        # 3. 錢包和交易相關端點
+        @self.app.post("/api/register-multi-sig-wallet", tags=['multisig'])
+        async def wallet_register(data: RegisterMultiSigWallet):
+            """註冊錢包地址"""
+            wallet_address = data.wallet_address.lower()
+            if not wallet_address:
+                raise HTTPException(status_code=400, detail="ownerAddress is required")
+
+            try:
+                # 嘗試使用錢包服務創建多簽錢包
+                multisig_address = await self.app.state.wallet_service_client.create_multi_sig_wallet(
+                    wallet_address,
+                    data.chain_id
+                )
+
+                # update user record, since multisig_info is a list, should check if duplicate and append it
+                await self.app.state.db_client.db.users.update_one(
+                    {"wallet_address": wallet_address},
+                    {"$addToSet": {"multisig_info": {"multisig_address": multisig_address, "chain_id": data.chain_id}}}
+                )
+
+                return {"success": True, "message": "Wallet registered successfully."}
+            except Exception as e:
+                logger.error(f"Error registering wallet: {e}")
+                raise HTTPException(status_code=500, detail=f"Failed to register wallet: {str(e)}")
+
+        @self.app.post("/api/get-multisig-wallets", tags=['multisig'])
+        async def get_multisig_wallets(wallet_address: str):
+            """獲取用戶的多簽錢包"""
+            wallet_address = wallet_address.lower()
+
+            # 檢查用戶是否存在
+            user = await self.app.state.wallet_service_client.get_multi_sig_wallet(wallet_address)
+            if not user:
+                raise HTTPException(status_code=404, detail="User not found")
+
+            # 檢查用戶是否有多簽錢包
+            multisig_address = user.get("multisig_address")
+            if not multisig_address:
+                raise HTTPException(status_code=404, detail="Multisig wallet not deployed for this user")
+
+            return {"multisig_address": multisig_address}
+
+
+
+        # 4. 資產和餘額相關端點
+        @self.app.post("/api/total-balance", tags=['wallet'])
+        async def get_total_balance(data: dict):
+            """獲取總餘額"""
+            wallet_address = data.get("wallet_address")
+            chain_id_list = data.get("chain_id_list")
+
+            if not wallet_address:
+                raise HTTPException(status_code=400, detail="wallet_address is required")
+
+            try:
+                return await self.app.state.okx_client.get_total_value_by_address(
+                    wallet_address,
+                    chain_id_list
+                )
+            except Exception as e:
+                logger.error(f"Error getting total balance: {e}")
+                raise HTTPException(status_code=500, detail=f"Failed to get total balance: {str(e)}")
+
+        @self.app.post("/api/total-balance-detail", tags=['wallet'])
+        async def get_total_balance_detail(data: dict):
+            """獲取詳細餘額信息"""
+            wallet_address = data.get("wallet_address")
+            chain_id_list = data.get("chain_id_list")
+
+            if not wallet_address:
+                raise HTTPException(status_code=400, detail="wallet_address is required")
+
+            try:
+                result = await self.app.state.okx_client.get_all_token_balances_by_address(
+                    wallet_address,
+                    chain_id_list,
+                    filter_risk_tokens=True
+                )
+
+                if not result['data']:
+                    return []
+
+                return await self.app.state.okx_client.process_token_data(result)
+            except Exception as e:
+                logger.error(f"Error getting balance details: {e}")
+                raise HTTPException(status_code=500, detail=f"Failed to get balance details: {str(e)}")
+
+        @self.app.post("/api/wallet-transaction-history", tags=['wallet'])
+        async def get_wallet_transaction_history(data: dict):
+            """獲取錢包交易歷史"""
+            wallet_address = data.get("wallet_address")
+            chain_id_list = data.get("chain_id_list")
+
+            if not wallet_address:
+                raise HTTPException(status_code=400, detail="wallet_address is required")
+
+            try:
+                result = await self.app.state.okx_client.get_transactions_by_address(
+                    wallet_address,
+                    chain_id_list
+                )
+
+                if not result['data']:
+                    return []
+
+                return await self.app.state.okx_client.process_transaction_data(result, wallet_address)
+            except Exception as e:
+                logger.error(f"Error getting transaction history: {e}")
+                raise HTTPException(status_code=500, detail=f"Failed to get transaction history: {str(e)}")
+
+        """ === Tool API Endpoints === """
+        @self.app.get("/health")
+        async def health_check():
+            """Health check endpoint"""
+            return {"status": "healthy", "timestamp": datetime.now().isoformat()}
+
+        @self.app.get("/api/tools", tags=['tools'])
+        async def get_available_tools():
+            """Get list of available tools"""
+            tools = []
+            for tool_name, tool_func in action_registry.items():
+                if tool_name.startswith("_"):
+                    continue
+                doc = tool_func.__doc__ or "No description available."
+                tools.append({"name": tool_name, "description": doc.strip()})
+            return {"tools": tools}
+
+        """ === Public Data API Endpoints === """
+
+        @self.app.get("/api/public-data/tickers", tags=['public_data'])
+        async def get_tickers():
+            """獲取行情數據"""
+            try:
+                tickers = await get_binance_tickers(["BTCUSDT", "ETHUSDT", "SOLUSDT"])
+                return {"tickers": tickers}
+            except Exception as e:
+                logger.error(f"Error fetching tickers: {e}")
+                raise HTTPException(status_code=500, detail=f"Failed to fetch tickers: {str(e)}")
+
+        @self.app.get("/api/messages", tags=['message'])
+        async def get_user_messages(wallet_address: str, show_history: bool = False):
+            """獲取用戶消息"""
+            wallet_address = wallet_address.lower()
+
+            # 獲取對話歷史
+            conversation = await self.app.state.db_client.db.conversations.find_one(
+                {"wallet_address": wallet_address})
+
+            if conversation and "messages" in conversation:
+                messages = conversation["messages"]
+
+                if show_history:
+                    # 返回所有非"thinking"類型的消息
+                    return {"messages": [msg for msg in messages if msg.get("message_type") != "thinking"]}
+                else:
+                    # 只返回最近的一條normal類型消息
+                    for msg in reversed(messages):
+                        if msg.get("message_type") == "normal":
+                            return {"messages": [msg]}
+                    return {"messages": []}
+
+            return {"messages": []}
+
         # Send a message via REST API (non-WebSocket option)
-        @self.app.post("/api/message/{wallet_address}")
+        @self.app.post("/api/message", tags=['message'])
         async def send_message(wallet_address: str, message: Dict[str, Any]):
             wallet_address = wallet_address.lower()
             connection_manager = self.app.state.connection_manager
