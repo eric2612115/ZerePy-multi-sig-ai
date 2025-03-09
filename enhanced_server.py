@@ -69,7 +69,7 @@ class BaseAgentAddress(BaseModel):
 
 
 class BaseAgentName(BaseModel):
-    agent_name: Optional[str] = "timetool_agent"
+    agent_name: Optional[str] = "crypto_agent"
 
 
 class BaseChainId(BaseModel):
@@ -96,7 +96,7 @@ class MultiClientManager:
         self.ping_task = None
         self.db_client = db_client
 
-    async def connect(self, wallet_address: str, websocket: WebSocket, agent_name: str = "timetool_agent"):
+    async def connect(self, wallet_address: str, websocket: WebSocket, agent_name: str = "crypto_agent"):
         """Accept a new WebSocket connection and initialize user session."""
         await websocket.accept()
         self.active_connections[wallet_address] = websocket
@@ -213,11 +213,8 @@ class MultiClientManager:
         logger.info(f"Agent set for user {wallet_address}")
 
     async def handle_client_message(self, wallet_address: str, message_data: Dict[str, Any]):
-        """Process an incoming client message."""
+        """Process an incoming client message with AI-driven tool selection."""
         logger.debug(f"Handling message for {wallet_address}: {message_data}")
-        print('-----------------')
-        print("message_data: ", message_data, "wallet_address: ", wallet_address)
-        print(self.user_sessions)
 
         if wallet_address in self.user_sessions:
             self.user_sessions[wallet_address]["last_message_time"] = datetime.now()
@@ -232,12 +229,9 @@ class MultiClientManager:
 
         self.set_agent_busy(wallet_address, True)
 
-        print('-------- Set agent busy --------')
-
         try:
-            # 獲取用戶訊息文本
+            # Get user message text
             user_text = message_data.get("query", "")
-            print('user_text: ', message_data)
             if not user_text:
                 await self.send_message(
                     wallet_address,
@@ -245,17 +239,17 @@ class MultiClientManager:
                 )
                 return
 
-            # 首先保存用戶訊息到資料庫
+            # Save user message to database
             user_message = MessageStructure.format_message("user", user_text)
             await self.db_client.save_message(wallet_address, user_message)
 
-            # 發送思考中訊息
+            # Send thinking message
             await self.send_message(
                 wallet_address,
                 MessageStructure.format_thinking("Processing your request...")
             )
 
-            # 獲取此用戶的agent
+            # Get agent for this user
             agent = self.get_agent_for_user(wallet_address)
             if not agent:
                 await self.send_message(
@@ -264,38 +258,104 @@ class MultiClientManager:
                 )
                 return
 
-            # 確保LLM提供者已設置
+            # Ensure LLM provider is set up
             if not agent.is_llm_set:
                 agent._setup_llm_provider()
 
-            # --- 關鍵修改：完全移除關鍵字檢查 ---
+            # Analyze thinking depth based on query complexity
+            from src.thinking_framework.thinking_depth_selector import analyze_thinking_depth
+            from src.server.structured_response_handler import StructuredResponseHandler
+
+            # Determine thinking depth
+            thinking_result = analyze_thinking_depth(user_text)
+            thinking_depth = thinking_result["depth"]
+
+            # Create prompt for tool selection
+            tools_prompt = "Based on the user's query, determine if you need to use a specific tool to respond. Available tools:\n"
+
+            # List available tools with descriptions
+            available_tools = []
+            for tool_name, tool_func in action_registry.items():
+                if not tool_name.startswith("_") and hasattr(tool_func, "__doc__") and tool_func.__doc__:
+                    tool_desc = tool_func.__doc__.strip().split("\n")[0]  # Get first line of docstring
+                    tools_prompt += f"- {tool_name}: {tool_desc}\n"
+                    available_tools.append(tool_name)
+
+            tools_prompt += "\nIf a tool is needed, respond with JSON in this format: {\"tool\": \"tool_name\", \"params\": {\"param1\": \"value1\"}}"
+            tools_prompt += "\nIf no tool is needed, respond with {\"tool\": null}"
+            tools_prompt += f"\nUser query: {user_text}"
+
+            # Ask the LLM to decide which tool to use
+            system_prompt = "You are an AI assistant that analyzes user requests and determines which tools to use."
+            tool_selection_response = agent.connection_manager.perform_action(
+                connection_name="timetool",
+                action_name="generate-text",
+                params=[tools_prompt, system_prompt]
+            )
+
+            # Try to parse JSON response to get tool selection
+            tool_name = None
+            tool_params = {}
             try:
+                import re
+                import json
+
+                # Extract JSON from the response (it might be wrapped in text)
+                json_match = re.search(r'\{[\s\S]*\}', tool_selection_response)
+                if json_match:
+                    tool_data = json.loads(json_match.group(0))
+                    tool_name = tool_data.get("tool")
+                    tool_params = tool_data.get("params", {})
+
+                    # Add the user text as a parameter if not already present
+                    if tool_name and "query" not in tool_params:
+                        tool_params["query"] = user_text
+            except Exception as e:
+                logger.warning(f"Failed to parse tool selection: {e}")
+
+            # Generate the response - either using the selected tool or standard generation
+            if tool_name and tool_name in available_tools:
+                logger.info(f"Using tool {tool_name} with params {tool_params}")
+
+                # Execute the selected tool
+                response = agent.connection_manager.perform_action(
+                    connection_name="timetool",
+                    action_name=tool_name,
+                    params=tool_params
+                )
+            else:
+                # Standard text generation for queries not requiring specific tools
+                logger.info(f"No specific tool selected, using standard text generation")
                 system_prompt = agent._construct_system_prompt()
                 response = agent.connection_manager.perform_action(
-                    "timetool",  # 始終使用 timetool 連接
-                    "generate-text",
-                    [user_text, system_prompt]
+                    connection_name="timetool",
+                    action_name="generate-text",
+                    params=[user_text, system_prompt]
                 )
 
-                # 發送響應
-                await self.send_message(
-                    wallet_address,
-                    MessageStructure.format_ai_response(response)
+            # For medium/deep thinking, structure the response
+            if thinking_depth in ["medium", "deep"]:
+                response_handler = StructuredResponseHandler()
+                structured_response = await response_handler.generate_structured_response(
+                    query=user_text,
+                    raw_response=response,
+                    thinking_level=thinking_depth
                 )
-            except Exception as e:
-                logger.error(f"TimeTool處理錯誤: {e}")
-                await self.send_message(
-                    wallet_address,
-                    MessageStructure.format_error(f"處理TimeTool請求時出錯: {str(e)}")
-                )
-            # --- 關鍵修改結束 ---
 
+                # Use the final answer from the structured response
+                response = structured_response["final_answer"]
 
-        except Exception as e:
-            logger.exception(f"處理消息時出錯: {e}")
+            # Send response
             await self.send_message(
                 wallet_address,
-                MessageStructure.format_error(f"處理消息時出錯: {str(e)}")
+                MessageStructure.format_ai_response(response)
+            )
+
+        except Exception as e:
+            logger.exception(f"Error processing message: {e}")
+            await self.send_message(
+                wallet_address,
+                MessageStructure.format_error(f"Error processing your request: {str(e)}")
             )
         finally:
             self.set_agent_busy(wallet_address, False)
@@ -350,7 +410,15 @@ async def lifespan(app: FastAPI):
     db_client = MongoDBClient(mongodb_url, database_name)
     await db_client.initialize_indexes()
     app.state.db_client = db_client  # Store db_client
-    # Create and store the connection manager
+
+    # Initialize context manager and structured response handler
+    from src.server.context_manager import ContextManager
+    from src.server.structured_response_handler import StructuredResponseHandler
+
+    app.state.context_manager = ContextManager()
+    app.state.response_handler = StructuredResponseHandler()
+
+    # Create the connection manager
     app.state.connection_manager = MultiClientManager(db_client)
 
     def signal_handler():
@@ -438,7 +506,7 @@ class ZerePyServer:
         async def websocket_endpoint(
                 websocket: WebSocket,
                 wallet_address: str,
-                agent_name: str = Query(default="timetool_agent")
+                agent_name: str = Query(default="crypto_agent")
         ):
             wallet_address = wallet_address.lower()
             connection_manager = self.app.state.connection_manager
@@ -543,7 +611,7 @@ class ZerePyServer:
             return {"messages": history}
 
         @self.app.post("/api/create-agent", tags=['agent'])
-        # async def create_agent(wallet_address: str, agent_name: str = Query(default="timetool_agent")):
+        # async def create_agent(wallet_address: str, agent_name: str = Query(default="crypto_agent")):
         async def create_agent(data: CreateAgent):
             wallet_address = data.wallet_address.lower()
             print(wallet_address)
@@ -742,6 +810,38 @@ class ZerePyServer:
                 tools.append({"name": tool_name, "description": doc.strip()})
             return {"tools": tools}
 
+        @self.app.post("/api/tools/execute", tags=['tools'])
+        async def execute_tool(
+                wallet_address: str,
+                tool_name: str,
+                params: Dict[str, Any]
+        ):
+            """Execute a specific tool with parameters"""
+            wallet_address = wallet_address.lower()
+            connection_manager = self.app.state.connection_manager
+
+            # Check if agent exists
+            agent = connection_manager.get_agent_for_user(wallet_address)
+            if not agent:
+                raise HTTPException(status_code=404, detail="Agent not found")
+
+            # Check if tool exists in action registry
+            if tool_name not in action_registry:
+                raise HTTPException(status_code=404, detail=f"Tool {tool_name} not found")
+
+            try:
+                # Execute the requested tool
+                result = action_registry[tool_name](agent, **params)
+                return {
+                    "success": True,
+                    "result": result,
+                    "tool": tool_name,
+                    "timestamp": datetime.now().isoformat()
+                }
+            except Exception as e:
+                logger.exception(f"Error executing tool {tool_name}: {e}")
+                raise HTTPException(status_code=500, detail=f"Error executing tool: {str(e)}")
+
         """ === Public Data API Endpoints === """
 
         @self.app.get("/api/public-data/tickers", tags=['public_data'])
@@ -783,6 +883,8 @@ class ZerePyServer:
         async def send_message(wallet_address: str, message: Dict[str, Any]):
             wallet_address = wallet_address.lower()
             connection_manager = self.app.state.connection_manager
+            context_manager = self.app.state.context_manager
+            response_handler = self.app.state.response_handler
 
             # Check if agent exists for this user
             agent = connection_manager.get_agent_for_user(wallet_address)
@@ -794,7 +896,7 @@ class ZerePyServer:
                     if not user or not user.get("has_agent"):
                         raise HTTPException(status_code=404, detail="User has no agent configured")
 
-                    agent_name = user.get("agent_name", "timetool_agent")
+                    agent_name = user.get("agent_name", "crypto_agent")
                     agent = ZerePyAgent(agent_name)
                     connection_manager.set_agent_for_user(wallet_address, agent)
                 except Exception as e:
@@ -806,20 +908,43 @@ class ZerePyServer:
             connection_manager.set_agent_busy(wallet_address, True)
 
             try:
-                # First, save the user message to database
-                print(f"user_message = MessageStructure.format_message message: {message.get('text', '')}")
-                print(f"user_message = MessageStructure.format_message message: {message}")
-                user_message = MessageStructure.format_message("user", message.get("text", ""))
+                user_text = message.get("text", "")
+
+                # Update context with new message
+                await context_manager.add_message(wallet_address, {
+                    "sender": "user",
+                    "text": user_text
+                })
+
+                # Determine thinking level
+                thinking_level = await context_manager.get_thinking_level(wallet_address, user_text)
+
+                # Save user message to database
+                user_message = MessageStructure.format_message("user", user_text)
                 await self.app.state.db_client.save_message(wallet_address, user_message)
 
                 # Make sure the LLM provider is set up
                 if not agent.is_llm_set:
                     agent._setup_llm_provider()
 
-                # Generate the response using the agent
-                print(f"agent.prompt_llm message: {message.get('text', '')}")
-                print(f"agent.prompt_llm message: {message}")
-                response = agent.prompt_llm(message.get("text", ""))
+                # Generate response - potentially using appropriate tools
+                response = agent.prompt_llm(user_text)
+
+                # For medium/deep thinking, create structured response
+                if thinking_level in ["medium", "deep"]:
+                    structured_response = await response_handler.generate_structured_response(
+                        query=user_text,
+                        raw_response=response,
+                        thinking_level=thinking_level
+                    )
+
+                    # For API responses, use final answer but store full structure
+                    response = structured_response["final_answer"]
+
+                    # Store structured response in context
+                    await context_manager.update_context(wallet_address, {
+                        "last_structured_response": structured_response
+                    })
 
                 # Save the agent's response to database
                 agent_message = MessageStructure.format_ai_response(response)
@@ -831,7 +956,6 @@ class ZerePyServer:
                 raise HTTPException(status_code=500, detail=f"Error processing message: {str(e)}")
             finally:
                 connection_manager.set_agent_busy(wallet_address, False)
-
 
 def create_app():
     """Create and return the FastAPI app."""
