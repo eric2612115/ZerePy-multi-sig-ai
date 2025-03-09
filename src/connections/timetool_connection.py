@@ -276,6 +276,7 @@ class TimeToolConnection(BaseConnection):
             raise TimeToolAPIError(f"Failed to get datetime: {e}")
 
     def get_symbol_price(self, symbol: str) -> str:
+        print('AI trying to use get_symbol_price')
         """Get the current price of a symbol"""
         try:
             url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}"

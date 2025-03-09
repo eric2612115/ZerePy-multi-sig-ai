@@ -62,28 +62,10 @@ def main():
             if not user_input:
                 continue
 
-            # Handle special commands
-            if user_input.lower() == "time":
-                result = agent.connection_manager.perform_action("timetool", "get-time", [])
-                logger.info(f"\n{agent.name}: The current time is {result}.\n")
-                continue
-
-            if user_input.lower() == "date":
-                result = agent.connection_manager.perform_action("timetool", "get-date", [])
-                logger.info(f"\n{agent.name}: Today's date is {result}.\n")
-                continue
-
-            if user_input.lower().startswith("price "):
-                symbol = user_input.split(" ", 1)[1].strip().upper()
-                result = agent.connection_manager.perform_action("timetool", "get-symbol-price", [symbol])
-                logger.info(f"\n{agent.name}: The current price of {symbol} is {result}.\n")
-                continue
-
-            # For other queries, use the generate-text action
             response = agent.connection_manager.perform_action(
                 "timetool",
                 "generate-text",
-                [user_input, agent._construct_system_prompt()]
+                [user_input, agent._construct_system_prompt()]  # 確保這裡有正確的 system_prompt
             )
             logger.info(f"\n{agent.name}: {response}\n")
             print_h_bar()
