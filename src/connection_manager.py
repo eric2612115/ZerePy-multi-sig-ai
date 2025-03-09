@@ -10,18 +10,18 @@ from src.connections.twitter_connection import TwitterConnection
 from src.connections.farcaster_connection import FarcasterConnection
 from src.connections.ollama_connection import OllamaConnection
 from src.connections.echochambers_connection import EchochambersConnection
-from src.connections.solana_connection import SolanaConnection
 from src.connections.hyperbolic_connection import HyperbolicConnection
 from src.connections.galadriel_connection import GaladrielConnection
 from src.connections.sonic_connection import SonicConnection
 from src.connections.discord_connection import DiscordConnection
-from src.connections.allora_connection import AlloraConnection
 from src.connections.xai_connection import XAIConnection
 from src.connections.ethereum_connection import EthereumConnection
 from src.connections.together_connection import TogetherAIConnection
 from src.connections.evm_connection import EVMConnection
 from src.connections.perplexity_connection import PerplexityConnection
 from src.connections.monad_connection import MonadConnection
+
+from src.connections.timetool_connection import TimeToolConnection
 
 logger = logging.getLogger("connection_manager")
 
@@ -36,6 +36,8 @@ class ConnectionManager:
     def _class_name_to_type(class_name: str) -> Type[BaseConnection]:
         if class_name == "twitter":
             return TwitterConnection
+        elif class_name == "timetool":
+            return TimeToolConnection
         elif class_name == "anthropic":
             return AnthropicConnection
         elif class_name == "openai":
