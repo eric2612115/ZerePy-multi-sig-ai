@@ -30,6 +30,8 @@ class WalletServiceClient:
                     response.raise_for_status()
                     return await response.json()
             else:
+
+                print(f"Requesting {method} {url} with data: {data}")
                 async with session.request(method, url, headers=self.header, json=data) as response:
                     response.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
                     return await response.json()
@@ -256,8 +258,15 @@ if __name__ == '__main__':
     async def main():
         client = WalletServiceClient()
         # print(await client.get_sonic_balance("0x2f500d4178d36ae358898b6ca398f2cfca0daff6"))
-        print(await client.get_sonic_balance("0x2f500d4178d36ae358898b6ca398f2cfca0daff6"))
+        # print(await client.get_sonic_balance("0x2f500d4178d36ae358898b6ca398f2cfca0daff6"))
+        print(await client.add_multi_sig_wallet_whitelist(
+            chain_id=146,
+            safe_wallet_address="0x1234567890123456789012345678901234567890",
+            whitelist_signatures=["0x2f500d4178d36ae358898b6ca398f2cfca0daff6"],
+            token_addresses=["0x2f500d4178d36ae358898b6ca398f2cfca0daff6"]
+        ))
         # print(await client.get_asset_info_list(146))
+
         # print(await client.get_asset_price_list(146))
         # print(await client.get_asset_info_with_price(146))
 

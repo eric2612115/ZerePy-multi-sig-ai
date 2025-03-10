@@ -1189,14 +1189,15 @@ class MultiClientManager:
                         # 再問一次產生一份 ai 可以理解且 符合 execute-portfolio-batch-trade 工具的 json output 讓 function 可以直接使用
                         #
                         print("Prepare to buy batch tokens ...")
-                        base_chain_hot_tokens = await self.get_hot_tokens(8453)
+                        # base_chain_hot_tokens = await self.get_hot_tokens(8453)
+
+                        # chain_id: 8453 mean base chain,hot token: {base_chain_hot_tokens}
                         sonic_chain_hot_tokens = await self.get_hot_tokens(146)
                         batch_trades_analysis_prompt = f"""
                         In a conversation about cryptocurrency operations, analyze the user's request for batch trades.
                         here is user's detailed request: {user_text}
                         user's conversation history: {conversation_context}
                         
-                        chain_id: 8453 mean base chain,hot token: {base_chain_hot_tokens}
                         sonic chain_id: 146 mean sonic chain, hot token: {sonic_chain_hot_tokens}
                         
                         here is hot tokens data, include the chain_id, contract address, and price, so you could use it to calculate the output_token_min_amount.
@@ -1608,7 +1609,7 @@ class MultiClientManager:
 
         # 3. 構造批量操作的輸入
         # Get safe wallet address for this user and chain
-        user_data = await self.app.state.wallet_service_client.check_multi_sig_wallet(wallet_address)
+        user_data = await self.app.state.wallet_service_client.get_multi_sig_wallet(wallet_address)
         multisig_info = user_data.get("safeWalletList", [])
         safe_wallet_address = None
         chain_id = batch_info.get("chain_id") or self._get_chain_id_from_name(batch_info.get("chain"))
@@ -1879,26 +1880,26 @@ class MultiClientManager:
     async def add_token_whitelist(self, wallet_address: str, token_addresses: List[str], chain_id: int = 8453,
                                   whitelist_signatures: List[str] = None,
                                   **kwargs) -> str:
-        # body = {
-        #     "chain_id": chain_id,
-        #     "safe_wallet_address": wallet_address,
-        #     "token_addresses": token_addresses,
-        #     "whitelist_signatures": whitelist_signatures
-        # }
-        # mock = {
-        #     "status": "success",
-        #     "message": "Token whitelist updated successfully"
-        # }
-        #
-        # print('body: ', body)
-        # return mock
+        body = {
+            "chain_id": chain_id,
+            "safe_wallet_address": wallet_address,
+            "token_addresses": token_addresses,
+            "whitelist_signatures": whitelist_signatures
+        }
+        mock = {
+            "status": "success",
+            "message": "Token whitelist updated successfully"
+        }
+
+        print('body: ', body)
+        return mock
         """Add tokens to the multisig wallet whitelist"""
-        return await self.wallet_service_client.add_multi_sig_wallet_whitelist(
-            safe_wallet_address=wallet_address,
-            chain_id=chain_id,
-            whitelist_signatures=whitelist_signatures,
-            token_addresses=token_addresses
-        )
+        # return await self.wallet_service_client.add_multi_sig_wallet_whitelist(
+        #     safe_wallet_address=wallet_address,
+        #     chain_id=chain_id,
+        #     whitelist_signatures=whitelist_signatures,
+        #     token_addresses=token_addresses
+        # )
 
     async def remove_token_whitelist(self, wallet_address: str, token_addresses: List[str], chain_id: int = 8453,
                                      whitelist_signatures: List[str] = None,
@@ -2223,7 +2224,7 @@ class ZerePyServer:
             user = await self.app.state.db_client.get_user(wallet_address)
             if not user:
                 return {"has_agent": False, "multisig_info": None}
-            mul_sig_wallets = await self.app.state.wallet_service_client.check_multi_sig_wallet(wallet_address)
+            mul_sig_wallets = await self.app.state.wallet_service_client.get_multi_sig_wallet(wallet_address)
             return {
                 "has_agent": user.get("has_agent", False),
                 "multisig_info": mul_sig_wallets['safeWalletList']
@@ -2318,7 +2319,7 @@ class ZerePyServer:
             user = await self.app.state.db_client.get_user(wallet_address)
 
             if user:
-                mul_sig_wallets = await self.app.state.wallet_service_client.check_multi_sig_wallet(wallet_address)
+                mul_sig_wallets = await self.app.state.wallet_service_client.get_multi_sig_wallet(wallet_address)
                 return {
                     "has_agent": user.get("has_agent", False),
                     "multisig_info": mul_sig_wallets['safeWalletList']
@@ -2370,19 +2371,16 @@ class ZerePyServer:
             return {"multisig_address": multisig_address}
 
         # 4. 資產和餘額相關端點
-        @self.app.post("/api/total-balance", tags=['wallet'])
-        async def get_total_balance(data: dict):
+        @self.app.get("/api/total-balance/{wallet_address}", tags=['wallet'])
+        async def get_total_balance(wallet_address: str):
             """獲取總餘額"""
-            wallet_address = data.get("wallet_address")
-            chain_id_list = data.get("chain_id_list")
 
             if not wallet_address:
                 raise HTTPException(status_code=400, detail="wallet_address is required")
 
             try:
                 return await self.app.state.okx_client.get_total_value_by_address(
-                    wallet_address,
-                    chain_id_list
+                    wallet_address
                 )
             except Exception as e:
                 logger.error(f"Error getting total balance: {e}")
