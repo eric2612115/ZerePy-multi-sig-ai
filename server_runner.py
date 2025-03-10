@@ -82,15 +82,17 @@ def main():
 
     # Start the server
     logger.info(f"Starting ZerePy server on {args.host}:{args.port}")
-    try:
-        start_server(host=args.host, port=args.port)
-    except KeyboardInterrupt:
-        logger.info("Server stopped by user")
-    except Exception as e:
-        logger.error(f"Server error: {e}", exc_info=True)
-        return 1
 
-    return 0
+    start_server(host=args.host, port=args.port)
+    # try:
+    #     start_server(host=args.host, port=args.port)
+    # except KeyboardInterrupt:
+    #     logger.info("Server stopped by user")
+    # except Exception as e:
+    #     logger.error(f"Server error: {e}", exc_info=True)
+    #     return 1
+    #
+    # return 0
 
 
 if __name__ == "__main__":

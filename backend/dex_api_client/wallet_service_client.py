@@ -1,3 +1,5 @@
+from typing import List
+
 import aiohttp, asyncio, json, logging, os
 from dotenv import find_dotenv, load_dotenv
 
@@ -23,9 +25,14 @@ class WalletServiceClient:
         """Centralized request handling with retries."""
         session = await self._get_session()
         try:
-            async with session.request(method, url, headers=self.header, json=data) as response:
-                response.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
-                return await response.json()
+            if method.upper() == "GET":
+                async with session.request(method, url, headers=self.header, params=data) as response:
+                    response.raise_for_status()
+                    return await response.json()
+            else:
+                async with session.request(method, url, headers=self.header, json=data) as response:
+                    response.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
+                    return await response.json()
         except aiohttp.ClientResponseError as e:
             if e.status == 429 or e.status >= 500:  # Retry on rate limits or server errors
                 logging.error(f"Request failed after multiple retries: {e}")
@@ -124,7 +131,7 @@ class WalletServiceClient:
         }
         return await self._request("POST", url, data=data)
 
-    async def multi_sig_wallet_swap(self, chain_id: int, ai_address: str, safe_wallet_address: str, pair_address: str,
+    async def multi_sig_wallet_swap(self, chain_id: int, ai_address: str, safe_wallet_address: str,
                                     input_token_address: str, input_token_amount: str, output_token_address: str,
                                     output_token_min_amount: str):
         """
@@ -135,7 +142,6 @@ class WalletServiceClient:
             "chain": str(chain_id),  #Ensure chain is string
             "aiAddress": ai_address,
             "safeWalletAddress": safe_wallet_address,
-            "pairAddress": pair_address,
             "inputTokenAddress": input_token_address,
             "inputTokenAmount": input_token_amount,
             "outputTokenAddress": output_token_address,
@@ -143,7 +149,117 @@ class WalletServiceClient:
         }
         return await self._request("POST", url, data=data)
 
+    async def get_sonic_balance(self, wallet_address: str):
+        """
+        Retrieves the balance of a Sonic wallet.
+
+        :param wallet_address: The address of the wallet.
+        :return: A dictionary containing the wallet balance.
+        """
+        url = f"{self.base_url}/wallet/sonic/balance?owner={wallet_address}"
+        return await self._request("GET", url)
+
+    async def get_asset_info_list(self,chain_id: int, token_address: List[str] = None):
+        """
+        Retrieves the asset information list.
+
+        :param chain_id: The ID of the blockchain.
+        :param token_address: The address of the token.
+        :return: A dictionary containing the asset information list.
+        """
+        url = f"{self.base_url}/asset/info/list"
+        query = {"chainId": f"{chain_id}"}
+        if token_address:
+            query["tokenAddresses"] = token_address
+        return await self._request("GET", url, data=query)
+
+    async def get_asset_info(self, chain_id: int, token_address: str):
+        """
+        Retrieves the asset information.
+
+        :param chain_id: The ID of the blockchain.
+        :param token_address: The address of the token.
+        :return: A dictionary containing the asset information.
+        """
+        url = f"{self.base_url}/asset/info"
+        query = {"chainId": f"{chain_id}", "tokenAddress": [token_address]}
+        return await self._request("GET", url, data=query)
+
+    async def get_asset_price_list(self, chain_id: int, token_address: List[str] = None):
+        """
+        Retrieves the token price list.
+
+        :param chain_id: The ID of the blockchain.
+        :param token_address: The address of the token.
+        :return: A dictionary containing the token price list.
+        """
+        url = f"{self.base_url}/asset/price/list"
+        query = {"chainId": f"{chain_id}"}
+        if token_address:
+            query["tokenAddresses"] = token_address
+        return await self._request("GET", url, data=query)
+
+    async def get_asset_price(self, chain_id: int, token_address: str):
+        """
+        Retrieves the token price.
+
+        :param chain_id: The ID of the blockchain.
+        :param token_address: The address of the token.
+        :return: A dictionary containing the token price.
+        """
+        url = f"{self.base_url}/asset/price"
+        query = {"chainId": f"{chain_id}", "tokenAddress": token_address}
+        return await self._request("GET", url, data=query)
+
+    async def get_asset_info_with_price(self, chain_id: int, token_address: List[str] = None, token_name: List[str] = None):
+        """
+        Retrieves the asset information with price.
+
+        :param chain_id: The ID of the blockchain.
+        :param token_address: The address of the token.
+        :param token_name: The name of the token.
+        :return: A dictionary containing the asset information with price.
+        """
+        url = f"{self.base_url}/asset/info-price/list"
+        query = {"chainId": f"{chain_id}"}
+        res = await self._request("GET", url, data=query)
+        if token_address:
+            res = [i for i in res if i["tokenAddress"] in token_address]
+
+        if token_name:
+            res = [i for i in res if i["tokenName"] in token_name]
+
+        return res
+
+    """ ===== Wallet ====="""
+    async def get_swap_history(self, wallet_address: str, chain_id: int):
+        """
+        Retrieves the swap history of a wallet.
+
+        :param wallet_address: The address of the wallet.
+        :param chain_id: The ID of the blockchain.
+        :return: A dictionary containing the swap history.
+        """
+        url = f"{self.base_url}/wallet/swap/history"
+        query = {"walletAddress": wallet_address, "chainId": f"{chain_id}"}
+        return await self._request("GET", url, data=query)
+
+
+
     async def close(self):
         """Closes the aiohttp ClientSession."""
         if self.session:
             await self.session.close()
+
+
+if __name__ == '__main__':
+    async def main():
+        client = WalletServiceClient()
+        # print(await client.get_sonic_balance("0x2f500d4178d36ae358898b6ca398f2cfca0daff6"))
+        print(await client.get_sonic_balance("0x2f500d4178d36ae358898b6ca398f2cfca0daff6"))
+        # print(await client.get_asset_info_list(146))
+        # print(await client.get_asset_price_list(146))
+        # print(await client.get_asset_info_with_price(146))
+
+
+    asyncio.run(main())

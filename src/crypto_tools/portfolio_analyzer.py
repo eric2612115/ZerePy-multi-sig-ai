@@ -73,9 +73,9 @@ async def analyze_portfolio(
 
             if address and chain_id and third_party_client:
                 security_data = await analyze_token_security(
-                    token_symbol=symbol,
+                    original_token=symbol,
                     chain_id=chain_id,
-                    token_address=address,
+                    target_token=address,
                     third_party_client=third_party_client
                 )
                 security_risk = security_data.get("risk_score", 5)

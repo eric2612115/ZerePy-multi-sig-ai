@@ -372,29 +372,78 @@ class OkxWeb3Client:
         # 3. 返回默认图标 (如果都没有找到)
         return "https://via.placeholder.com/24x24"  # 一个占位符图片
 
-    async def process_token_data(self, token_data):
-        formatted_balances = []
-        for item in token_data['data'][0]['tokenAssets']:
-            chain_name = self.chain_id_map_to_name.get(item['chainIndex'], item['chainIndex'])  # 获取链名称
-            balance = float(item['balance'])
-            token_price = float(item['tokenPrice'])
-            value = f"{balance * token_price:.2f}"  # 计算美元价值并格式化
-            # icon_url = self.get_icon_url(item['chainIndex'], item['symbol'], item['tokenAddress'])
-            formatted_balances.append({
-                "chain": chain_name,
-                "chainIndex": item['chainIndex'],
-                "symbol": item['symbol'],
-                "balance": f"{balance:.4f}",  # 格式化余额
-                "tokenPrice": item['tokenPrice'],
-                "value": value,
-                "tokenAddress": item['tokenAddress'],
-                "tokenType": item['tokenType'],
-                "isRiskToken": item['isRiskToken'],
-                "icon": None,
-                "transferAmount": item['transferAmount'],
-                "availableAmount": item['availableAmount']
+    async def process_token_data(self, token_data, sonic_data, chain_id: str = None):
+        """
+        Processes and combines token data from normal balances and Sonic balances,
+        formatting it into a unified structure.
 
-            })
+        Args:
+            token_data: The token data from normal balances (e.g., from OKX).
+            sonic_data: The token data from Sonic balances.
+            chain_id (optional):  If provided, filter results to only include this chain.
+
+        Returns:
+            A list of dictionaries, where each dictionary represents a token balance
+            with the unified format.
+        """
+        formatted_balances = []
+
+        # Process normal balances (e.g., from OKX)
+        if token_data and token_data.get('code') == '0' and token_data.get('data'):  # Check for valid data
+            for item in token_data['data'][0].get('tokenAssets', []):  # Handle potential missing 'tokenAssets'
+                current_chain_id = item.get('chainIndex')
+                if chain_id is not None and str(current_chain_id) != str(chain_id):
+                    continue  # Skip if chain_id is provided and doesn't match
+
+                chain_name = self.chain_id_map_to_name.get(current_chain_id, current_chain_id)  # Get chain name
+                balance = float(item.get('balance', 0))  # Default to 0 if 'balance' is missing
+                token_price = float(item.get('tokenPrice', 0))  # Default to 0
+                value = f"{balance * token_price:.2f}"
+                formatted_balances.append({
+                    "chain": chain_name,
+                    "chainIndex": current_chain_id,
+                    "symbol": item.get('symbol', 'N/A'),  # Default to N/A
+                    "balance": f"{balance:.4f}",
+                    "tokenPrice": str(token_price),  # Keep origin data type
+                    "value": value,
+                    "tokenAddress": item.get('tokenAddress', ''),  # Default to empty str
+                    "tokenType": item.get('tokenType'),
+                    "isRiskToken": item.get('isRiskToken'),
+                    "icon": None,  # Assuming you'll handle icon URLs elsewhere
+                    "transferAmount": item.get('transferAmount', '0'),
+                    "availableAmount": item.get('availableAmount', '0')
+                })
+
+        # Process Sonic balances
+        if sonic_data and sonic_data.get('list'):  # Check sonic data exists
+            for item in sonic_data['list']:
+                # Sonic balance doesn't have chain ID,  we add it later.
+                # We still filter here based on chain_id if provided, but need a way
+                # to determine the chain.  If chain_id is provided and it's NOT 146
+                # we skip sonic data, as sonic data is only on chain 146
+
+                if chain_id is not None and str(chain_id) != "146":
+                    continue
+
+                balance = float(item.get('balance', 0))
+                price = float(item.get('price', 0))
+                value = f"{balance * price:.2f}"
+
+                formatted_balances.append({
+                    "chain": self.chain_id_map_to_name.get("146", "Sonic"),  # Sonic is on chain 146
+                    "chainIndex": "146",
+                    "symbol": item.get('symbol', 'N/A'),
+                    "balance": item.get('formattedBalance', '0'),  # Use formattedBalance from sonic
+                    "tokenPrice": str(price),
+                    "value": value,
+                    "tokenAddress": item.get('tokenAddress', ''),
+                    "tokenType": "N/A",  # Sonic data might not have this; set a default
+                    "isRiskToken": False,  # Sonic data might not have this; set a default
+                    "icon": None,
+                    "transferAmount": '0',  # Sonic data doesn't have this
+                    "availableAmount": '0'  # Sonic data doesn't have this
+                })
+
         return formatted_balances
 
     async def process_transaction_data(self, transaction_data, my_address: str, if_filter_risk: bool = True):

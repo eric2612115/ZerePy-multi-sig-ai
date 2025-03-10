@@ -34,6 +34,7 @@ class ConnectionManager:
 
     @staticmethod
     def _class_name_to_type(class_name: str) -> Type[BaseConnection]:
+        print(f"CCCCCCC: {class_name}")
         if class_name == "twitter":
             return TwitterConnection
         elif class_name == "timetool":

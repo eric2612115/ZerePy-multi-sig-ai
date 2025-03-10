@@ -21,7 +21,7 @@ async def fetch_ticker_data(session, symbol, exchange_url):
 
 
 
-async def get_binance_tickers(symbols):
+async def get_binance_tickers(symbols: list):
     """Fetches ticker data for multiple symbols from the Binance API."""
     exchange_url = "https://api.binance.com/api/v3/ticker/24hr?symbol="
     results = {}

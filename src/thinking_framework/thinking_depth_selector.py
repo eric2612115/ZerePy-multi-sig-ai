@@ -21,17 +21,65 @@ class ThinkingDepthSelector:
             "deep": "Complex queries requiring thorough analysis, deep reasoning, or comprehensive evaluation. Often involves strategy, optimization, risk assessment, or multi-faceted analysis."
         }
 
-    async def evaluate_thinking_depth(self, query: str, agent) -> str:
+    async def evaluate_thinking_depth(self, query: str, agent, conversation_context=None) -> str:
         """
-        Use the LLM itself to determine the appropriate thinking depth with crypto-specific understanding.
-
-        Args:
-            query: The user's query text
-            agent: The agent instance with connection to LLM
-
-        Returns:
-            The thinking depth as string ("light", "medium", or "deep")
+        Use the LLM to determine the appropriate thinking depth with context awareness.
         """
+        # 檢查是否為簡短回覆（如 "Yes"、"OK"）
+        is_short_confirmation = len(query.strip()) <= 5
+
+        # 檢查是否有上下文和前一個消息
+        has_context = conversation_context and "last_messages" in conversation_context
+        previous_depth = None
+        previous_intents = []
+
+        if is_short_confirmation and has_context:
+            # 尋找上一個對話和相關深度
+            recent_messages = conversation_context.get("last_messages", [])
+            for i in range(len(recent_messages) - 1, -1, -1):
+                msg = recent_messages[i]
+                # 如果是用戶的上一個消息（不是當前的"Yes"）
+                if (msg.get("sender") == "user" and msg.get("text") != query and
+                        len(msg.get("text", "").strip()) > 5):
+
+                    # 創建一個臨時的專門提示詞來分析確認意圖的上下文
+                    confirmation_eval_prompt = f"""
+                    In a cryptocurrency conversation, the user first asked:
+                    "{msg.get('text')}"
+
+                    Now the user has responded with:
+                    "{query}"
+
+                    If the user's response is confirming an action or transaction mentioned in the 
+                    first message, what would that action be? Is the user confirming a transaction, 
+                    purchase, or other financial operation?
+
+                    If confirming a transaction, respond with "CONFIRM_TRANSACTION". 
+                    If confirming another financial operation, respond with "CONFIRM_OPERATION".
+                    If asking a new question or not confirming anything, respond with "NO_CONFIRMATION".
+                    """
+
+                    # 使用LLM分析確認意圖
+                    try:
+                        confirmation_analysis = agent.connection_manager.perform_action(
+                            connection_name="anthropic",
+                            action_name="generate-text",
+                            params=[confirmation_eval_prompt, "You analyze conversation context."]
+                        )
+
+                        # 如果確認是交易相關的，使用深度思考
+                        if "CONFIRM_TRANSACTION" in confirmation_analysis:
+                            logger.info(f"Detected transaction confirmation from '{query}' based on previous message")
+                            return "deep"
+                        elif "CONFIRM_OPERATION" in confirmation_analysis:
+                            logger.info(f"Detected operation confirmation, using medium depth")
+                            return "medium"
+                    except Exception as e:
+                        logger.error(f"Error analyzing confirmation context: {e}")
+
+
+                    break
+
         # First detect intents to inform depth evaluation
         intents = self.detect_intent(query, agent)
 
@@ -105,7 +153,7 @@ First, analyze the query considering these crypto-specific criteria. Then respon
         # Get LLM to evaluate the query
         try:
             response = agent.connection_manager.perform_action(
-                connection_name="timetool",  # Use timetool or appropriate LLM provider
+                connection_name="crypto_tools",  # Use timetool or appropriate LLM provider
                 action_name="generate-text",
                 params=[eval_prompt, "You are a crypto expert evaluating query complexity."]
             )
@@ -137,76 +185,118 @@ First, analyze the query considering these crypto-specific criteria. Then respon
             A list of detected intents
         """
         intent_prompt = f"""
-Analyze the following user query in the context of cryptocurrency and DeFi operations.
-Identify all relevant intents, focusing especially on transaction-related intentions that require careful analysis.
+    Analyze the following user query in the context of cryptocurrency and DeFi operations.
+    Identify all relevant intents, focusing especially on transaction-related intentions that require careful analysis.
 
-INTENT CATEGORIES:
-1. Information Queries (Generally Light):
-   - price_check: Checking price or value of a token
-   - time_check: Asking about time or dates
-   - basic_info: Basic facts about tokens, chains, or crypto concepts
-   - status_check: Checking status of services or transactions
+    INTENT CATEGORIES:
+    1. Information Queries (Generally Light):
+       - price_check: Checking price or value of a token
+       - time_check: Asking about time or dates
+       - basic_info: Basic facts about tokens, chains, or crypto concepts
+       - status_check: Checking status of services or transactions
 
-2. Analysis Queries (Generally Medium):
-   - market_analysis: Requesting market trend or price movement analysis
-   - token_comparison: Comparing different tokens or projects
-   - educational: Seeking to learn or understand a crypto concept
-   - portfolio_view: Viewing or checking portfolio status (without changes)
-   - liquidity_check: Checking liquidity of a token or pool
+    2. Analysis Queries (Generally Medium):
+       - market_analysis: Requesting market trend or price movement analysis
+       - token_comparison: Comparing different tokens or projects
+       - educational: Seeking to learn or understand a crypto concept
+       - portfolio_view: Viewing or checking portfolio status (without changes)
+       - liquidity_check: Checking liquidity of a token or pool
 
-3. Transaction & Risk Queries (Generally Deep):
-   - transaction_intent: Any intention to perform an actual transaction (buy, sell, swap)
-   - defi_operation: Operations involving DeFi protocols (farming, staking, lending)
-   - whitelist_operation: Adding or removing tokens from whitelist
-   - security_assessment: Evaluating security risks of tokens or contracts
-   - investment_strategy: Seeking advice on investment approach
-   - portfolio_modification: Changing portfolio allocation or structure
-   - chain_interaction: Operations requiring interaction with the blockchain
-   - multisig_operation: Operations involving multisig wallets
+    3. Transaction & Risk Queries (Generally Deep):
+       - transaction_intent: Any intention to perform an actual transaction (buy, sell, swap)
+       - batch_trades: User wants to buy or sell multiple tokens in a single operation
+       - defi_operation: Operations involving DeFi protocols (farming, staking, lending)
+       - whitelist_operation: Adding or removing tokens from whitelist
+       - security_assessment: Evaluating security risks of tokens or contracts
+       - investment_strategy: Seeking advice on investment approach
+       - portfolio_modification: Changing portfolio allocation or structure
+       - chain_interaction: Operations requiring interaction with the blockchain
+       - multisig_operation: Operations involving multisig wallets
 
-User query: "{query}"
+    User query: "{query}"
 
-Return only a JSON array of the most relevant intents, like: ["transaction_intent", "security_assessment"]
-"""
+    IMPORTANT:
+    1. Be particularly sensitive to any transaction-related intents, even if subtly implied
+    2. Buying, selling, or swapping tokens should always be classified as transaction_intent
+    3. If there's mention of risks, security, or scams, always include security_assessment
+    4. If there's genuine uncertainty about the intent, default to basic_info
+
+    Return only a JSON array of the relevant intents, like: ["transaction_intent", "security_assessment"]
+    """
         try:
+            # Make multiple attempts to get a valid response
+            max_attempts = 2
+            for attempt in range(max_attempts):
+                response = agent.connection_manager.perform_action(
+                    connection_name="anthropic",  # Use the appropriate LLM provider
+                    action_name="generate-text",
+                    params=[intent_prompt, "You are a crypto-specialized intent analyzer."]
+                )
+
+                # Extract JSON array from response using multiple patterns
+                import re
+                import json
+
+                # Try different JSON array patterns
+                patterns = [
+                    r'\[.*\]',  # Standard array [...]
+                    r'\{\s*"intents"\s*:\s*\[.*\]\s*\}',  # {"intents": [...]}
+                    r'"intents":\s*\[.*\]'  # "intents": [...]
+                ]
+
+                for pattern in patterns:
+                    array_match = re.search(pattern, response)
+                    if array_match:
+                        match_text = array_match.group(0)
+                        # If we matched a JSON object, extract just the array
+                        if match_text.startswith('{'):
+                            try:
+                                intents_obj = json.loads(match_text)
+                                return intents_obj.get("intents", ["basic_info"])
+                            except json.JSONDecodeError:
+                                continue
+                        else:
+                            # Clean the match text if it's not a proper array
+                            if not match_text.startswith('['):
+                                colon_pos = match_text.find(':')
+                                if colon_pos > -1:
+                                    match_text = match_text[colon_pos + 1:].strip()
+
+                            # Try to parse as JSON array
+                            try:
+                                intents = json.loads(match_text)
+                                if isinstance(intents, list):
+                                    return intents
+                            except json.JSONDecodeError:
+                                continue
+
+                # If we reach here, no pattern matched successfully
+                logger.warning(f"Attempt {attempt + 1}: Failed to extract intents JSON from response")
+
+            # If all attempts failed, fall back to a simpler prompt
+            simplest_prompt = f"""
+    Classify this query: "{query}"
+    Choose from: price_check, time_check, basic_info, status_check, market_analysis, token_comparison, 
+    educational, portfolio_view, liquidity_check, transaction_intent, defi_operation, whitelist_operation,
+    security_assessment, investment_strategy, portfolio_modification, chain_interaction, multisig_operation.
+
+    Return only a JSON array with your choices, like: ["basic_info"]
+    """
             response = agent.connection_manager.perform_action(
-                connection_name="timetool",
+                connection_name="anthropic",
                 action_name="generate-text",
-                params=[intent_prompt, "You are a crypto-specialized intent analyzer."]
+                params=[simplest_prompt, "You are a classifier."]
             )
 
-            # Extract JSON array from response
-            import re
-            import json
-
-            # Find JSON array pattern
             array_match = re.search(r'\[.*\]', response)
             if array_match:
-                intents = json.loads(array_match.group(0))
-                return intents
+                return json.loads(array_match.group(0))
 
-            # Fallback intent extraction if JSON parsing fails
-            transaction_intents = [
-                "transaction_intent", "defi_operation", "whitelist_operation",
-                "multisig_operation", "chain_interaction"
-            ]
-
-            # Check if any transaction-related terms appear in the response
-            for intent in transaction_intents:
-                if intent.lower() in response.lower():
-                    return [intent, "security_assessment"]  # Security is always important with transactions
-
-            # Check for basic information types
-            if any(term in query.lower() for term in ["price", "worth", "value", "cost", "how much"]):
-                return ["price_check"]
-
-            if any(term in query.lower() for term in ["analysis", "evaluate", "review", "study", "assess"]):
-                return ["market_analysis"]
-
-            return ["basic_info"]  # Default fallback
         except Exception as e:
             logger.error(f"Error detecting intents: {e}")
-            return ["basic_info"]  # Safe default
+
+        # Final fallback if everything else fails
+        return ["basic_info"]
 
     async def determine_thinking_depth(self, query: str, agent, context: Optional[Dict[str, Any]] = None) -> Dict[
         str, Any]:

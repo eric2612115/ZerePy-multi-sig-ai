@@ -63,9 +63,9 @@ SECURITY_ISSUES = {
 
 
 async def analyze_token_security(
-        token_symbol: str,
+        original_token: str,
         chain_id: str,
-        token_address: str,
+        target_token: str,
         third_party_client=None,
         cave_client=None
 ) -> Dict[str, Any]:
@@ -82,13 +82,13 @@ async def analyze_token_security(
     Returns:
         A dictionary containing security analysis results
     """
-    logger.debug(f"Analyzing security for {token_symbol} ({token_address}) on chain {chain_id}")
+    logger.debug(f"Analyzing security for {original_token} -> ({target_token}) on chain {chain_id}")
 
     try:
         # Initialize results structure
         security_result = {
-            "symbol": token_symbol,
-            "address": token_address,
+            "original_token": original_token,
+            "target_token": target_token,
             "chain_id": chain_id,
             "timestamp": datetime.now().isoformat(),
             "issues_found": [],
@@ -101,8 +101,8 @@ async def analyze_token_security(
         if third_party_client:
             try:
                 security_data = await third_party_client.get_security(
-                    original_token=token_symbol,
-                    target_token=token_address,
+                    original_token=original_token,
+                    target_token=target_token,
                     chain=chain_id,
                     amount="1000"
                 )
@@ -160,7 +160,7 @@ async def analyze_token_security(
         if cave_client:
             try:
                 # Formulate a security query for the token
-                security_query = f"Analyze the security risks of token {token_symbol} with contract address {token_address} on chain {chain_id}. Look for mint functions, hidden owners, proxy capabilities, and high fees."
+                security_query = f"Analyze the security risks of token {target_token} on chain {chain_id}. Look for mint functions, hidden owners, proxy capabilities, and high fees."
 
                 carv_analysis = await cave_client.fetch_on_chain_data_by_llm(security_query)
 
@@ -264,8 +264,8 @@ async def check_contract_issues(
             6. Ability to pause or freeze transfers
             7. Honeypot characteristics
             """
-
-            response = await cave_client.fetch_on_chain_data_by_llm(query)
+            # got a lot of issue on this one
+            # response = await cave_client.fetch_on_chain_data_by_llm(query)
 
             # Process the response to extract issues
             # This implementation depends on the structure of CARV's response

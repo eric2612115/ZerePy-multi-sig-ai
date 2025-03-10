@@ -40,10 +40,13 @@ class StructuredResponseHandler:
         logger.debug(f"Generating structured response for query: {query[:50]}...")
 
         # Detect thinking level if not provided
+        thinking_result = {}
+        print(f"Thinking level: {thinking_level}")
         if not thinking_level:
             thinking_result = analyze_thinking_depth(query)
             thinking_level = thinking_result["depth"]
-
+            print(f"Thinking level: {thinking_level}")
+            print(f"Thinking result: {thinking_result}")
         # Create thinking steps based on depth
         main_steps = process_thinking_steps(
             query=query,
